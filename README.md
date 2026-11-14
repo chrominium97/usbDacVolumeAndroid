@@ -23,37 +23,33 @@ with the Apple adapter on a Galaxy S24 Ultra:
 - **Music went silent after the volume was set** until it was paused and resumed by hand. The
   app now pauses playback for about 3 seconds, sets the volume, and lets playback resume.
 
+It also has a new Material 3 interface with a volume slider in dB instead of a hex field.
+
 There is no prebuilt APK for this fork yet; see [Building](#building). The APK under upstream's
 releases still has the relaunch loop.
 
 ## Usage
 
-1. Open the app once. If your headset has a microphone, tap **Request record permission**
-   (see [Microphone permission](#microphone-permission)).
+1. Open **USB DAC Volume** once. If your headset has a microphone, tap **Allow** in the
+   Microphone permission card (see [Microphone permission](#microphone-permission)).
 2. Plug in the adapter with headphones connected. When Android asks which app should open the
    device, choose this one and tick "Always".
-3. Leave the volume field at `0000` (0 dB, the maximum on most adapters) and tap **Apply**.
-   Music pauses for about 3 seconds, then resumes louder.
+3. Leave the **Hardware volume** slider at 0 dB (the maximum on most adapters) and tap
+   **Apply**. Music pauses for about 3 seconds, then resumes louder. The card at the top shows
+   the result, for example "Set to 0.0 dB (was −20.0 dB)".
 
 Options:
 
-- **Auto Apply on Start** applies the volume whenever the app starts, including when Android
-  opens it because the adapter was plugged in.
-- **Quit app after applying volume** closes the app once the volume is set.
+- **Apply when connected** sets the volume each time Android opens the app because the adapter
+  was plugged in. Opening the app yourself does not apply anything, so it never pauses your
+  music unasked.
+- **Close after applying** closes the app once the volume is set.
 
 The adapter forgets the setting every time it reconnects, which includes plugging the
 headphones into it. Turn on both options to have it applied automatically each time.
 
-### The volume value
-
-The field holds the raw value sent to the adapter: a signed 16-bit number in 1/256 dB, written
-as two hex bytes with the low byte first.
-
-| Field  | Volume |
-|--------|--------|
-| `0000` | 0 dB   |
-| `00FA` | −6 dB  |
-| `00F4` | −12 dB |
+The slider covers −60 to 0 dB until the first apply, then follows the range the adapter
+reports. A volume saved by an older version (as a hex value) is converted to dB.
 
 ### Microphone permission
 
