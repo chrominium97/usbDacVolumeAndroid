@@ -8,7 +8,6 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
 import android.hardware.usb.UsbConfiguration;
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
@@ -27,9 +26,6 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
-import android.widget.Button;
-import android.widget.CheckBox;
-import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -38,6 +34,12 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import com.example.libusbAndroidTest.databinding.ActivityMainBinding;
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.color.DynamicColors;
+import com.google.android.material.color.MaterialColors;
+import com.google.android.material.materialswitch.MaterialSwitch;
+import com.google.android.material.progressindicator.LinearProgressIndicator;
+import com.google.android.material.slider.Slider;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -78,12 +80,20 @@ public class MainActivity extends AppCompatActivity {
     private Runnable pendingApply;
     private AudioFocusRequest focusRequest;
     private long quietSince;
+    private boolean launchedByAttach;
 
-    private TextView status;
-    private EditText volInput;
-    private CheckBox autoApply;
-    private CheckBox quitAfterApply;
-    private Button recordPermissionButton;
+    // Volume slider bounds until the adapter's own range has been read once (during an apply).
+    private static final float DEFAULT_MIN_DB = -60f, DEFAULT_MAX_DB = 0f, SLIDER_STEP_DB = 0.5f;
+
+    private TextView deviceName;
+    private TextView deviceState;
+    private LinearProgressIndicator progress;
+    private Slider volumeSlider;
+    private TextView volumeValue;
+    private MaterialButton applyButton;
+    private MaterialSwitch autoApply;
+    private MaterialSwitch quitAfterApply;
+    private View micCard;
 
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
         @Override
@@ -94,7 +104,7 @@ public class MainActivity extends AppCompatActivity {
                 onDeviceReady(device);
             } else {
                 Log.w(TAG, "USB permission denied for " + device);
-                status.setText("USB permission denied");
+                setState(device, getString(R.string.state_permission_denied), false, true);
             }
         }
     };
@@ -102,21 +112,42 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        DynamicColors.applyToActivityIfAvailable(this);
 
         ActivityMainBinding binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
-        status = binding.sampleText;
-        volInput = binding.volume;
+        deviceName = binding.deviceName;
+        deviceState = binding.deviceState;
+        progress = binding.progress;
+        volumeSlider = binding.volumeSlider;
+        volumeValue = binding.volumeValue;
+        applyButton = binding.applyButton;
         autoApply = binding.autoApply;
         quitAfterApply = binding.quitAfterApply;
-        recordPermissionButton = binding.recordPermissionButton;
+        micCard = binding.micCard;
 
         SharedPreferences settings = prefs();
-        volInput.setText(settings.getString("volume", "0000"));
+        setSliderRange(settings.getFloat("rangeMinDb", DEFAULT_MIN_DB), settings.getFloat("rangeMaxDb", DEFAULT_MAX_DB),
+                savedVolumeDb(settings));
+        volumeSlider.setLabelFormatter(value -> getString(R.string.volume_value, db(value)));
+        volumeSlider.addOnChangeListener((slider, value, fromUser) -> {
+            volumeValue.setText(getString(R.string.volume_value, db(value)));
+            if (fromUser) prefs().edit().putFloat("volumeDb", value).apply();
+        });
+        volumeValue.setText(getString(R.string.volume_value, db(volumeSlider.getValue())));
+
         autoApply.setChecked(settings.getBoolean("autoApply", false));
         quitAfterApply.setChecked(settings.getBoolean("quitAfterApply", false));
-        recordPermissionButton.setEnabled(ContextCompat.checkSelfPermission(this,
-                Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED);
+        autoApply.setOnCheckedChangeListener((button, checked) -> {
+            if (!checked) cancelPendingApply();
+            prefs().edit().putBoolean("autoApply", checked).apply();
+        });
+        quitAfterApply.setOnCheckedChangeListener((button, checked) ->
+                prefs().edit().putBoolean("quitAfterApply", checked).apply());
+        applyButton.setOnClickListener(this::applyButtonPressed);
+        binding.micButton.setOnClickListener(view -> ActivityCompat.requestPermissions(this,
+                new String[]{Manifest.permission.RECORD_AUDIO}, CALLBACK_PERMISSION));
+        updateMicCard();
 
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
@@ -146,7 +177,10 @@ public class MainActivity extends AppCompatActivity {
 
     private void handleIntent(Intent intent) {
         UsbDevice device = null;
-        if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction())) {
+        // "Apply when connected" means a plug-in, not every time the app is opened: applying
+        // pauses whatever is playing.
+        launchedByAttach = UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction());
+        if (launchedByAttach) {
             device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
         }
         if (device == null || !hasAudioControl(device)) {
@@ -154,7 +188,7 @@ public class MainActivity extends AppCompatActivity {
         }
         if (device == null) {
             dac = null;
-            status.setText("No USB audio device.\nConnect the adapter with headphones plugged in.");
+            setState(null, getString(R.string.no_device_hint), false, false);
             return;
         }
 
@@ -162,7 +196,7 @@ public class MainActivity extends AppCompatActivity {
         if (usbManager.hasPermission(device)) {
             onDeviceReady(device);
         } else {
-            status.setText("Waiting for USB permission…");
+            setState(device, getString(R.string.state_waiting_permission), true, false);
             Intent permission = new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName());
             int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
             usbManager.requestPermission(device, PendingIntent.getBroadcast(this, 0, permission, flags));
@@ -171,8 +205,11 @@ public class MainActivity extends AppCompatActivity {
 
     private void onDeviceReady(UsbDevice device) {
         dac = device;
-        status.setText(String.valueOf(device.getProductName()));
-        if (autoApply.isChecked()) autoApplyWhenAudioReady(device);
+        setState(device, getString(R.string.state_connected), false, false);
+        if (autoApply.isChecked() && launchedByAttach) {
+            launchedByAttach = false;
+            autoApplyWhenAudioReady(device);
+        }
     }
 
     /**
@@ -184,7 +221,7 @@ public class MainActivity extends AppCompatActivity {
      */
     private void autoApplyWhenAudioReady(UsbDevice device) {
         cancelPendingApply();
-        status.setText(device.getProductName() + "\nWaiting for Android to connect the audio output…");
+        setState(device, getString(R.string.state_waiting_audio), true, false);
         audioDeviceWait = new AudioDeviceCallback() {
             @Override
             public void onAudioDevicesAdded(AudioDeviceInfo[] added) {
@@ -223,7 +260,7 @@ public class MainActivity extends AppCompatActivity {
                 .build();
         boolean granted = audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
         Log.i(TAG, "transient audio focus " + (granted ? "granted" : "not granted") + ", waiting for the output to idle");
-        status.setText(device.getProductName() + "\nPausing playback to apply the volume…");
+        setState(device, getString(R.string.state_pausing), true, false);
 
         long started = SystemClock.elapsedRealtime();
         quietSince = -1;
@@ -246,8 +283,12 @@ public class MainActivity extends AppCompatActivity {
                 if (!idle) Log.w(TAG, "playback did not stop within " + MAX_IDLE_WAIT_MS + " ms, applying anyway");
                 boolean ok = applyVolume(device);
                 abandonFocus();
-                if (!idle) status.append("\nPlayback kept running: if the sound is gone, pause and resume it.");
-                if (ok && quitWhenDone) finishAndRemoveTask();
+                if (ok && !idle) setState(device, getString(R.string.state_playback_kept_running), false, true);
+                if (ok && quitWhenDone) {
+                    Toast.makeText(getApplicationContext(), getString(R.string.toast_applied,
+                            db(volumeSlider.getValue())), Toast.LENGTH_SHORT).show();
+                    finishAndRemoveTask();
+                }
             }
         };
         handler.post(pendingApply);
@@ -272,27 +313,56 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    public void applyButtonPressed(View view) {
+    private void applyButtonPressed(View view) {
         UsbDevice device = findAudioDevice();
         if (device == null || !usbManager.hasPermission(device)) {
-            status.setBackgroundColor(Color.RED);
-            if (device != null) handleIntent(new Intent()); // asks for permission
+            handleIntent(new Intent()); // shows "no device" or asks for permission
             return;
         }
-        status.setBackgroundColor(Color.TRANSPARENT);
-        if (parseVolume() == null) return;
-
-        prefs().edit().putString("volume", volInput.getText().toString().trim()).apply();
         applyWhenOutputIdle(device, false);
     }
 
-    public void autoApplyCheckboxPressed(View view) {
-        if (!autoApply.isChecked()) cancelPendingApply();
-        prefs().edit().putBoolean("autoApply", autoApply.isChecked()).apply();
+    /**
+     * Updates the device card. {@code device} null means no adapter; {@code busy} shows the
+     * progress bar and disables Apply; {@code error} colors the state line.
+     */
+    private void setState(UsbDevice device, String state, boolean busy, boolean error) {
+        deviceName.setText(device == null ? getString(R.string.no_device) : String.valueOf(device.getProductName()));
+        deviceState.setText(state);
+        deviceState.setTextColor(MaterialColors.getColor(deviceState,
+                error ? androidx.appcompat.R.attr.colorError : com.google.android.material.R.attr.colorOnSurfaceVariant));
+        progress.setVisibility(busy ? View.VISIBLE : View.GONE);
+        applyButton.setEnabled(device != null && !busy);
     }
 
-    public void quitAfterApplyCheckboxPressed(View view) {
-        prefs().edit().putBoolean("quitAfterApply", quitAfterApply.isChecked()).apply();
+    private void updateMicCard() {
+        boolean granted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+        micCard.setVisibility(granted ? View.GONE : View.VISIBLE);
+    }
+
+    /** The saved volume; older versions stored the raw little-endian request bytes as hex. */
+    private static float savedVolumeDb(SharedPreferences settings) {
+        if (settings.contains("volumeDb")) return settings.getFloat("volumeDb", DEFAULT_MAX_DB);
+        String hex = settings.getString("volume", "0000");
+        if (!hex.matches("[0-9A-Fa-f]{4}")) return DEFAULT_MAX_DB;
+        return le16(hexStringToByteArray(hex), 0) / 256f;
+    }
+
+    /** Sets the slider bounds to the adapter's range, snapped inward to the slider's step. */
+    private void setSliderRange(float minDb, float maxDb, float valueDb) {
+        float from = (float) Math.ceil(minDb / SLIDER_STEP_DB) * SLIDER_STEP_DB;
+        float to = (float) Math.floor(maxDb / SLIDER_STEP_DB) * SLIDER_STEP_DB;
+        if (to <= from) {
+            from = DEFAULT_MIN_DB;
+            to = DEFAULT_MAX_DB;
+        }
+        float value = Math.round(Math.max(from, Math.min(to, valueDb)) / SLIDER_STEP_DB) * SLIDER_STEP_DB;
+        volumeSlider.setValueFrom(Math.min(from, volumeSlider.getValueFrom()));
+        volumeSlider.setValueTo(Math.max(to, volumeSlider.getValueTo()));
+        volumeSlider.setValue(value);
+        volumeSlider.setValueFrom(from);
+        volumeSlider.setValueTo(to);
     }
 
     private SharedPreferences prefs() {
@@ -308,12 +378,12 @@ public class MainActivity extends AppCompatActivity {
      * Apple adapter re-enumerate, which relaunches this app and loses the new volume.
      */
     private boolean applyVolume(UsbDevice device) {
-        byte[] volume = parseVolume();
-        if (volume == null) return false;
+        int target = Math.round(volumeSlider.getValue() * 256);
+        byte[] volume = {(byte) target, (byte) (target >> 8)};
 
         UsbDeviceConnection connection = usbManager.openDevice(device);
         if (connection == null) {
-            status.setText("Could not open " + device.getProductName());
+            setState(device, getString(R.string.state_open_failed), false, true);
             return false;
         }
 
@@ -322,14 +392,15 @@ public class MainActivity extends AppCompatActivity {
         UsbInterface control = audio.isEmpty() ? null : audio.get(0);
         if (control == null || control.getInterfaceSubclass() != AUDIO_SUBCLASS_CONTROL) {
             connection.close();
-            status.setText(device.getProductName() + "\nNo audio interface in the active configuration.");
+            setState(device, getString(R.string.state_no_audio_interface), false, true);
             return false;
         }
 
         boolean uac1 = control.getInterfaceProtocol() == UAC1_PROTOCOL;
         int wIndex = (FEATURE_UNIT_ID << 8) | control.getId();
-        StringBuilder report = new StringBuilder();
         int channelsSet = 0;
+        Integer firstBefore = null, firstAfter = null;
+        int[] range = null;
         Log.i(TAG, String.format(Locale.US, "%s: configuration %d, %s, control interface %d",
                 device.getProductName(), config.getId(), uac1 ? "UAC1" : "UAC2/3", control.getId()));
 
@@ -345,13 +416,17 @@ public class MainActivity extends AppCompatActivity {
                 int sent = connection.controlTransfer(REQUEST_TYPE_OUT, uac1 ? UAC1_SET_CUR : UAC2_CUR,
                         wValue, wIndex, volume.clone(), volume.length, TIMEOUT_MS);
                 Integer after = getVolume(connection, uac1, wValue, wIndex);
-                String range = volumeRange(connection, uac1, wValue, wIndex);
+                int[] channelRange = volumeRange(connection, uac1, wValue, wIndex);
 
-                String line = String.format(Locale.US, "ch%d: %s → %s dB (range %s)%s", channel,
-                        db(before), db(after), range, sent == volume.length ? "" : " SET FAILED");
-                Log.i(TAG, line);
-                report.append('\n').append(line);
+                Log.i(TAG, String.format(Locale.US, "ch%d: %s → %s dB (range %s..%s)%s", channel,
+                        db(before), db(after), channelRange == null ? "?" : db(Integer.valueOf(channelRange[0])),
+                        channelRange == null ? "?" : db(Integer.valueOf(channelRange[1])), sent == volume.length ? "" : " SET FAILED"));
                 if (sent == volume.length) channelsSet++;
+                if (firstBefore == null) {
+                    firstBefore = before;
+                    firstAfter = after;
+                }
+                if (range == null) range = channelRange;
             }
         } finally {
             // releaseInterface() also asks the kernel to re-bind its driver. The audio driver only
@@ -364,11 +439,18 @@ public class MainActivity extends AppCompatActivity {
         boolean driverBack = audioDriverOwnsAll(connection, audio);
         connection.close();
 
+        if (range != null) {
+            prefs().edit().putFloat("rangeMinDb", range[0] / 256f).putFloat("rangeMaxDb", range[1] / 256f).apply();
+            setSliderRange(range[0] / 256f, range[1] / 256f, volumeSlider.getValue());
+        }
         boolean ok = channelsSet == CHANNELS.length && driverBack;
-        if (!driverBack) report.append("\nAudio driver did not come back: unplug and replug the headphones.");
-        status.setText(device.getProductName() + report);
-        Toast.makeText(getApplicationContext(), ok ? "Volume set for DAC!" : "Could not set the DAC volume",
-                Toast.LENGTH_LONG).show();
+        if (!driverBack) {
+            setState(device, getString(R.string.state_driver_missing), false, true);
+        } else if (channelsSet != CHANNELS.length) {
+            setState(device, getString(R.string.state_set_failed), false, true);
+        } else {
+            setState(device, getString(R.string.state_set, uiDb(firstAfter), uiDb(firstBefore)), false, false);
+        }
         return ok;
     }
 
@@ -388,16 +470,6 @@ public class MainActivity extends AppCompatActivity {
         }
         Log.i(TAG, state.toString());
         return all;
-    }
-
-    private byte[] parseVolume() {
-        String hex = volInput.getText().toString().trim();
-        if (!hex.matches("[0-9A-Fa-f]{4}")) {
-            volInput.setBackgroundColor(Color.RED);
-            return null;
-        }
-        volInput.setBackgroundColor(Color.TRANSPARENT);
-        return hexStringToByteArray(hex);
     }
 
     private UsbDevice findAudioDevice() {
@@ -454,26 +526,38 @@ public class MainActivity extends AppCompatActivity {
         return read == 2 ? le16(value, 0) : null;
     }
 
-    private static String volumeRange(UsbDeviceConnection connection, boolean uac1, int wValue, int wIndex) {
+    /** {min, max} in 1/256 dB, or null if the adapter does not report it. */
+    private static int[] volumeRange(UsbDeviceConnection connection, boolean uac1, int wValue, int wIndex) {
         if (uac1) {
             byte[] min = new byte[2];
             byte[] max = new byte[2];
             int a = connection.controlTransfer(REQUEST_TYPE_IN, UAC1_GET_MIN, wValue, wIndex, min, 2, TIMEOUT_MS);
             int b = connection.controlTransfer(REQUEST_TYPE_IN, UAC1_GET_MAX, wValue, wIndex, max, 2, TIMEOUT_MS);
-            return a == 2 && b == 2 ? db(le16(min, 0)) + ".." + db(le16(max, 0)) : "?";
+            return a == 2 && b == 2 ? new int[]{le16(min, 0), le16(max, 0)} : null;
         }
         // wNumSubRanges followed by MIN, MAX, RES of the first subrange
         byte[] range = new byte[8];
         int read = connection.controlTransfer(REQUEST_TYPE_IN, UAC2_RANGE, wValue, wIndex, range, range.length, TIMEOUT_MS);
-        return read == range.length ? db(le16(range, 2)) + ".." + db(le16(range, 4)) : "?";
+        return read == range.length ? new int[]{le16(range, 2), le16(range, 4)} : null;
     }
 
     private static int le16(byte[] bytes, int offset) {
         return (short) ((bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8));
     }
 
+    /** Formats a raw 1/256 dB value. */
     private static String db(Integer value) {
         return value == null ? "?" : String.format(Locale.US, "%.1f", value / 256.0);
+    }
+
+    /** Formats a raw 1/256 dB value for the screen. */
+    private static String uiDb(Integer raw) {
+        return raw == null ? "?" : db(raw / 256f);
+    }
+
+    /** Formats a dB value for the screen, with a real minus sign. */
+    private static String db(float value) {
+        return String.format(Locale.US, "%.1f", value).replace('-', '\u2212');
     }
 
     public static byte[] hexStringToByteArray(String s) {
@@ -488,16 +572,9 @@ public class MainActivity extends AppCompatActivity {
 
     private static final int CALLBACK_PERMISSION = 1;
 
-    public void recordPermissionButtonPressed(View view) {
-        ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, CALLBACK_PERMISSION);
-    }
-
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == CALLBACK_PERMISSION && grantResults.length > 0
-                && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            recordPermissionButton.setEnabled(false);
-        }
+        if (requestCode == CALLBACK_PERMISSION) updateMicCard();
     }
 }

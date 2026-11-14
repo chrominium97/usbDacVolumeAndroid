@@ -1,3 +1,31 @@
 <resources>
-    <string name="app_name">usbDacVolumeAndroid</string>
+    <string name="app_name">USB DAC Volume</string>
+
+    <string name="no_device">No USB audio device</string>
+    <string name="no_device_hint">Plug in the adapter with headphones connected.</string>
+    <string name="state_connected">Connected. Tap Apply to set the volume.</string>
+    <string name="state_waiting_permission">Waiting for USB permission…</string>
+    <string name="state_permission_denied">USB permission denied.</string>
+    <string name="state_waiting_audio">Waiting for Android to connect the audio output…</string>
+    <string name="state_pausing">Pausing playback to apply the volume…</string>
+    <string name="state_open_failed">Could not open the device.</string>
+    <string name="state_no_audio_interface">No audio interface in the active configuration.</string>
+    <string name="state_set">Set to %1$s dB (was %2$s dB)</string>
+    <string name="state_set_failed">The adapter rejected the volume.</string>
+    <string name="state_driver_missing">Audio did not come back. Unplug and replug the headphones.</string>
+    <string name="state_playback_kept_running">Playback did not pause. If the sound is gone, pause and resume it.</string>
+
+    <string name="volume_title">Hardware volume</string>
+    <string name="volume_value">%1$s dB</string>
+    <string name="volume_hint">The adapter\'s own amplifier. 0 dB is its maximum on most adapters; the phone\'s volume buttons still work on top of it.</string>
+    <string name="apply">Apply</string>
+    <string name="toast_applied">DAC volume set to %1$s dB</string>
+
+    <string name="auto_apply">Apply when connected</string>
+    <string name="auto_apply_hint">Runs each time the adapter connects with headphones. Music pauses for about 3 seconds while the volume is set.</string>
+    <string name="quit_after_apply">Close after applying</string>
+
+    <string name="mic_title">Microphone permission</string>
+    <string name="mic_hint">Android only lets apps open USB audio devices that can record, such as headsets with a mic, if they have microphone permission. This app never records.</string>
+    <string name="mic_allow">Allow</string>
 </resources>
