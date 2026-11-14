@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- specifying no attributes matches every device -->
-    <usb-device  />
+    <!-- Any device with an audio interface (class 1). The Apple adapter shows up as an
+         HID-only device until headphones are plugged in, and that should not launch the app. -->
+    <usb-device class="1" />
 </resources>
